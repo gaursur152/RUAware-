@@ -47,7 +47,7 @@ No user ID, session ID, device ID, IP, or RUID is ever stored on this entity.
 | `reportSubmittedAt` | Exact system timestamp — fine to store, it's about the data not the incident |
 | `status` | `submitted → under_review → {closed_no_action, referred_to_resources, awaiting_reporter_response, escalation_offered, closed}` |
 | `campus` | New Brunswick / Newark / Camden |
-| `ticketToken` | One-time secret shown only to reporter at submission; lets them check status / add info later without logging in again. Never linked to identity. |
+| `reporterTokenHash` | Keyed hash of the reporter's persistent `AnonymousAccountToken` (see below) — used to match status-check requests and as a pattern-clustering signal for reviewers. Never the token itself. |
 
 **Explicitly excluded:** RUID, session/device identifiers, raw IP (long-term),
 exact GPS, free-text address, unstripped file/photo metadata (EXIF can contain
@@ -70,6 +70,41 @@ GPS/device info — strip before storage if attachments are ever added).
 Stops at zone level deliberately — building-level + time bucket + incident type
 together risks re-identifying a specific incident.
 
+### `AnonymousAccountToken` (persistent pseudonym, not an identity)
+Issued once per verified student, used both to submit/check-status on reports
+and as the basis for abuse-prevention. Deliberately **not** derived from RUID —
+generated randomly so there is never a recoverable path back to a person.
+
+| Field | Notes |
+|---|---|
+| `tokenHash` | Keyed hash (HMAC with a server-held secret) of a high-entropy random token (recommend 256 bits, base32-encoded for manual transcription, excluding ambiguous characters like `0`/`O`, `1`/`l`). The raw token is shown to the student **once** at issuance and never stored. |
+| `submissionCount` / `windowStart` | Rolling counter for rate-limiting, checked at submission time instead of scanning the `Report` table. |
+| `lastUsedAt` | For abuse monitoring. |
+
+**Issuance flow:** student verifies via the email-verification MVP (see Account
+Provisioning below) → server generates the random token → shown once with a
+"save this now, we cannot recover it" warning → RUID/email is discarded
+immediately → only `tokenHash` persists.
+
+**Design tradeoff, decided deliberately:** using one persistent token for both
+login and rate-limiting means every report submitted under it shares the same
+`reporterTokenHash`, so they're linkable to each other (same anonymous source)
+even though never linkable to an identity. This was chosen over fully
+independent per-report tokens because it (a) enables real per-person rate
+limiting that survives session logout, and (b) doubles as the pattern-tracking
+signal reviewers use (see Triage Workflow) — "these reports share a source" is
+useful to VPVA/Title IX even without knowing who.
+
+**Revocation/moderation:** a keyed hash means rotating the server secret
+invalidates all tokens at once (incident response). A specific abusive
+`tokenHash` can also be individually blocklisted without ever knowing who
+issued it.
+
+**No recovery mechanism should exist** — any "recover my token" flow would
+require re-verifying identity, defeating the purpose. Losing the token means
+losing access to that history; the submission-confirmation UI must make this
+unambiguous.
+
 ### `EscalationRequest` (identified, opt-in only)
 The one entity in the system that holds real contact info. Held to a stricter
 access/audit standard than everything else.
@@ -77,7 +112,7 @@ access/audit standard than everything else.
 | Field | Notes |
 |---|---|
 | `escalationId` | UUID |
-| `linkedReportId` | Nullable — populated only if reporter used their ticket token to opt into escalation from an existing anonymous report; null if they went straight to this path |
+| `linkedReportId` | Nullable — populated only if reporter used their `AnonymousAccountToken` to opt into escalation from an existing anonymous report; null if they went straight to this path |
 | `requestType` | Align with VPVA/Title IX's existing intake categories — e.g. RUPD Report, Title IX Formal Process, Supportive Measures Only, Consultation/Information |
 | `requestFollowUpContact` | Boolean — a reporter may want a pattern flagged/patrols increased *without* personal contact |
 | `contactMethod` / `contactInfo` | Required only if follow-up requested; encrypted at rest |
@@ -144,6 +179,29 @@ into the frequency-map aggregation below.
 - Resolution may differ by audience: public/student view likely campus-zone
   level; reviewer view may justify finer resolution — an explicit policy
   decision, not a default.
+
+---
+
+## Abuse Prevention (Anonymous Submission)
+
+No identity exists to throttle against, so prevention works on the
+`AnonymousAccountToken`, not on who someone is:
+
+- **CAPTCHA/proof-of-work on submission** — cheap first line of defense against
+  naive bot spam, independent of identity.
+- **Per-token rate limiting** — `AnonymousAccountToken.submissionCount` /
+  `windowStart` caps submissions per rolling window. This survives logout/new
+  sessions, unlike session- or IP-based limiting.
+- **Progressive friction, not hard bans** — escalate (CAPTCHA → delay →
+  temporary cooldown) rather than a permanent block, since a hard ban is easy
+  to route around (new verification) and risks blocking a legitimate student
+  who tripped a threshold.
+- **Blocklist a specific `tokenHash`** if abuse is clearly occurring, without
+  ever needing to know who it belongs to.
+- Malicious/false *content* (as opposed to volume) is left to reviewer triage
+  rather than automated detection — a bad-faith report mostly costs reviewer
+  time, so it doesn't justify heavier identity-adjacent tracking unless real
+  abuse patterns show up in practice.
 
 ---
 
