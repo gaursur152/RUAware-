@@ -1,0 +1,6 @@
+public enum EscalationRequestType {
+    RUPD_REPORT,
+    TITLE_IX_FORMAL_PROCESS,
+    SUPPORTIVE_MEASURES_ONLY,
+    CONSULTATION_INFORMATION
+}
